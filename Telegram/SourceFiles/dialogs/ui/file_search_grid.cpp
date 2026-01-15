@@ -33,6 +33,7 @@ constexpr auto kThumbnailLoadDelay = crl::time(100);
 constexpr auto kCornerRadius = 8;
 constexpr auto kAdjacentPreviewSize = 24;
 constexpr auto kAdjacentPreviewOffset = 4;
+constexpr auto kArchiveBadgeSize = 16;
 
 [[nodiscard]] QString FormatFileSize(int64 size) {
 	return ::Ui::FormatSizeText(size);
@@ -116,7 +117,19 @@ constexpr auto kAdjacentPreviewOffset = 4;
 	return 0;
 }
 
-[[nodiscard]] bool IsArchiveFile(not_null<HistoryItem*> item) {
+[[nodiscard]] QString GetFileExtension(not_null<HistoryItem*> item) {
+	const auto name = GetFileName(item).toLower();
+	const auto dotPos = name.lastIndexOf('.');
+	if (dotPos >= 0) {
+		return name.mid(dotPos);
+	}
+	return QString();
+}
+
+} // namespace
+
+// Static method to check if an item is an archive file
+bool FileSearchGridWidget::IsArchiveFile(not_null<HistoryItem*> item) {
 	if (const auto media = item->media()) {
 		if (const auto document = media->document()) {
 			const auto name = document->filename().toLower();
@@ -127,13 +140,85 @@ constexpr auto kAdjacentPreviewOffset = 4;
 				|| name.endsWith(".gz")
 				|| name.endsWith(".tar.gz")
 				|| name.endsWith(".tgz")
-				|| name.endsWith(".bz2");
+				|| name.endsWith(".bz2")
+				|| name.endsWith(".xz")
+				|| name.endsWith(".lzma")
+				|| name.endsWith(".cab")
+				|| name.endsWith(".iso")
+				|| name.endsWith(".dmg");
 		}
 	}
 	return false;
 }
 
-} // namespace
+// Static method to check if item matches the specified filter
+bool FileSearchGridWidget::MatchesFilter(
+		not_null<HistoryItem*> item,
+		FileTypeFilter filter) {
+	if (filter == FileTypeFilter::All) {
+		return true;
+	}
+
+	const auto ext = GetFileExtension(item);
+	if (ext.isEmpty()) {
+		return false;
+	}
+
+	switch (filter) {
+	case FileTypeFilter::Archives:
+		return IsArchiveFile(item);
+
+	case FileTypeFilter::Documents:
+		return ext == ".pdf"
+			|| ext == ".doc"
+			|| ext == ".docx"
+			|| ext == ".xls"
+			|| ext == ".xlsx"
+			|| ext == ".ppt"
+			|| ext == ".pptx"
+			|| ext == ".odt"
+			|| ext == ".ods"
+			|| ext == ".odp"
+			|| ext == ".txt"
+			|| ext == ".rtf";
+
+	case FileTypeFilter::Images:
+		return ext == ".jpg"
+			|| ext == ".jpeg"
+			|| ext == ".png"
+			|| ext == ".gif"
+			|| ext == ".webp"
+			|| ext == ".bmp"
+			|| ext == ".tiff"
+			|| ext == ".svg"
+			|| ext == ".ico";
+
+	case FileTypeFilter::Videos:
+		return ext == ".mp4"
+			|| ext == ".avi"
+			|| ext == ".mkv"
+			|| ext == ".mov"
+			|| ext == ".webm"
+			|| ext == ".wmv"
+			|| ext == ".flv"
+			|| ext == ".m4v";
+
+	case FileTypeFilter::Audio:
+		return ext == ".mp3"
+			|| ext == ".wav"
+			|| ext == ".flac"
+			|| ext == ".ogg"
+			|| ext == ".m4a"
+			|| ext == ".aac"
+			|| ext == ".wma"
+			|| ext == ".opus";
+
+	case FileTypeFilter::All:
+		return true;
+	}
+
+	return false;
+}
 
 FileSearchGridWidget::FileSearchGridWidget(
 	QWidget *parent,
@@ -148,25 +233,53 @@ FileSearchGridWidget::~FileSearchGridWidget() = default;
 
 void FileSearchGridWidget::setResults(
 		std::vector<not_null<HistoryItem*>> results) {
+	_allResults = std::move(results);
+	applyFilter();
+}
+
+void FileSearchGridWidget::setResultsFiltered(
+		std::vector<not_null<HistoryItem*>> results,
+		FileTypeFilter filter) {
+	_config.filter = filter;
+	_allResults = std::move(results);
+	applyFilter();
+}
+
+void FileSearchGridWidget::setArchivesOnly(
+		std::vector<not_null<HistoryItem*>> results) {
+	setResultsFiltered(std::move(results), FileTypeFilter::Archives);
+}
+
+void FileSearchGridWidget::applyFilter() {
 	_items.clear();
-	_items.reserve(results.size());
 
-	for (size_t i = 0; i < results.size(); ++i) {
-		FileSearchGridItem gridItem;
-		gridItem.item = results[i];
-
-		// Set adjacent items for context
-		if (i > 0) {
-			gridItem.prevItem = results[i - 1];
+	// Filter results based on current filter setting
+	std::vector<not_null<HistoryItem*>> filteredResults;
+	for (const auto &item : _allResults) {
+		if (MatchesFilter(item, _config.filter)) {
+			filteredResults.push_back(item);
 		}
-		if (i + 1 < results.size()) {
-			gridItem.nextItem = results[i + 1];
+	}
+
+	_items.reserve(filteredResults.size());
+
+	for (size_t i = 0; i < filteredResults.size(); ++i) {
+		FileSearchGridItem gridItem;
+		gridItem.item = filteredResults[i];
+		gridItem.isArchive = IsArchiveFile(filteredResults[i]);
+
+		// Set adjacent items for context (from filtered results)
+		if (i > 0) {
+			gridItem.prevItem = filteredResults[i - 1];
+		}
+		if (i + 1 < filteredResults.size()) {
+			gridItem.nextItem = filteredResults[i + 1];
 		}
 
 		// Extract file metadata
-		gridItem.fileName = GetFileName(results[i]);
-		gridItem.fileSize = FormatFileSize(GetFileSize(results[i]));
-		gridItem.date = FormatDate(results[i]->date());
+		gridItem.fileName = GetFileName(filteredResults[i]);
+		gridItem.fileSize = FormatFileSize(GetFileSize(filteredResults[i]));
+		gridItem.date = FormatDate(filteredResults[i]->date());
 
 		_items.push_back(std::move(gridItem));
 	}
@@ -175,13 +288,16 @@ void FileSearchGridWidget::setResults(
 	_pressedIndex = -1;
 
 	// Schedule thumbnail loading
-	_thumbnailLoadTimer.callOnce(kThumbnailLoadDelay);
+	if (!_items.empty()) {
+		_thumbnailLoadTimer.callOnce(kThumbnailLoadDelay);
+	}
 
 	resize(width(), calculateHeight());
 	update();
 }
 
 void FileSearchGridWidget::clearResults() {
+	_allResults.clear();
 	_items.clear();
 	_hoveredIndex = -1;
 	_pressedIndex = -1;
@@ -190,13 +306,33 @@ void FileSearchGridWidget::clearResults() {
 }
 
 void FileSearchGridWidget::setConfig(const FileSearchGridConfig &config) {
+	const auto filterChanged = (_config.filter != config.filter);
 	_config = config;
-	resize(width(), calculateHeight());
-	update();
+	if (filterChanged) {
+		applyFilter();
+	} else {
+		resize(width(), calculateHeight());
+		update();
+	}
 }
 
 const FileSearchGridConfig &FileSearchGridWidget::config() const {
 	return _config;
+}
+
+void FileSearchGridWidget::setFilter(FileTypeFilter filter) {
+	if (_config.filter != filter) {
+		_config.filter = filter;
+		applyFilter();
+	}
+}
+
+FileTypeFilter FileSearchGridWidget::filter() const {
+	return _config.filter;
+}
+
+int FileSearchGridWidget::itemCount() const {
+	return static_cast<int>(_items.size());
 }
 
 std::vector<not_null<HistoryItem*>> FileSearchGridWidget::selectedItems() const {
@@ -285,6 +421,11 @@ void FileSearchGridWidget::paintItem(
 	// Paint main thumbnail
 	paintThumbnail(p, item.thumbnail, thumbnailRect, true);
 
+	// Paint archive badge if this is an archive file
+	if (item.isArchive) {
+		paintArchiveBadge(p, thumbnailRect);
+	}
+
 	// Paint adjacent message previews (if enabled and available)
 	if (_config.showAdjacentMessages) {
 		// Previous message preview (left side)
@@ -353,6 +494,36 @@ void FileSearchGridWidget::paintThumbnail(
 		foldPath.closeSubpath();
 		p.fillPath(foldPath, st::dialogsTextFg);
 	}
+}
+
+void FileSearchGridWidget::paintArchiveBadge(
+		QPainter &p,
+		const QRect &thumbnailRect) {
+	auto hq = PainterHighQualityEnabler(p);
+
+	// Draw archive badge in bottom-right corner of thumbnail
+	const auto badgeRect = QRect(
+		thumbnailRect.right() - kArchiveBadgeSize - 2,
+		thumbnailRect.bottom() - kArchiveBadgeSize - 2,
+		kArchiveBadgeSize,
+		kArchiveBadgeSize);
+
+	// Badge background
+	p.setPen(Qt::NoPen);
+	p.setBrush(QColor(76, 175, 80)); // Material green
+	p.drawRoundedRect(badgeRect, 3, 3);
+
+	// Draw ZIP text or icon
+	p.setPen(Qt::white);
+	p.setFont(st::normalFont);
+	
+	const auto fm = p.fontMetrics();
+	const auto text = "Z";
+	const auto textRect = fm.boundingRect(text);
+	p.drawText(
+		badgeRect.center().x() - textRect.width() / 2,
+		badgeRect.center().y() + fm.ascent() / 2 - 1,
+		text);
 }
 
 void FileSearchGridWidget::paintAdjacentPreview(

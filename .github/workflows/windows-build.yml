@@ -57,6 +57,11 @@ on:
     # Run nightly builds at 2 AM UTC
     - cron: '0 2 * * *'
 
+# Explicitly set permissions for security
+permissions:
+  contents: read
+  actions: read
+
 jobs:
   windows-build:
     name: Windows ${{ inputs.architecture || 'x64' }} ${{ inputs.build_type || 'Debug' }}

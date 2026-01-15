@@ -1,0 +1,260 @@
+name: Windows Build Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build configuration'
+        required: true
+        default: 'Release'
+        type: choice
+        options:
+          - Debug
+          - Release
+          - RelWithDebInfo
+      architecture:
+        description: 'Target architecture'
+        required: true
+        default: 'x64'
+        type: choice
+        options:
+          - x64
+          - x64_x86
+          - arm64
+      qt_version:
+        description: 'Qt version'
+        required: true
+        default: 'qt6'
+        type: choice
+        options:
+          - qt6
+          - qt5
+      upload_artifacts:
+        description: 'Upload build artifacts'
+        required: true
+        default: true
+        type: boolean
+  push:
+    branches:
+      - master
+      - main
+      - 'release/**'
+    paths:
+      - 'Telegram/SourceFiles/**'
+      - 'Telegram/CMakeLists.txt'
+      - 'cmake/**'
+      - '.github/workflows/windows-build.yml'
+  pull_request:
+    branches:
+      - master
+      - main
+    paths:
+      - 'Telegram/SourceFiles/**'
+      - 'Telegram/CMakeLists.txt'
+      - 'cmake/**'
+      - '.github/workflows/windows-build.yml'
+  schedule:
+    # Run nightly builds at 2 AM UTC
+    - cron: '0 2 * * *'
+
+# Explicitly set permissions for security
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  windows-build:
+    name: Windows ${{ inputs.architecture || 'x64' }} ${{ inputs.build_type || 'Debug' }}
+    runs-on: ${{ (inputs.architecture == 'arm64' || github.event_name == 'schedule') && 'windows-11-arm' || 'windows-latest' }}
+    
+    env:
+      BUILD_TYPE: ${{ inputs.build_type || 'Debug' }}
+      ARCHITECTURE: ${{ inputs.architecture || 'x64' }}
+      QT_VERSION: ${{ inputs.qt_version || 'qt6' }}
+      UPLOAD_ARTIFACT: ${{ inputs.upload_artifacts || (github.event_name == 'schedule') || 'true' }}
+      PREPARE_PATH: "Telegram/build/prepare/prepare.py"
+
+    defaults:
+      run:
+        shell: cmd
+
+    steps:
+      - name: Display build configuration
+        shell: bash
+        run: |
+          echo "🔧 Build Configuration:"
+          echo "  - Build Type: ${{ env.BUILD_TYPE }}"
+          echo "  - Architecture: ${{ env.ARCHITECTURE }}"
+          echo "  - Qt Version: ${{ env.QT_VERSION }}"
+          echo "  - Upload Artifacts: ${{ env.UPLOAD_ARTIFACT }}"
+          echo "  - Trigger: ${{ github.event_name }}"
+
+      - name: Prepare directories
+        run: |
+          mkdir %userprofile%\TBuild\Libraries
+          mklink /d %GITHUB_WORKSPACE%\TBuild %userprofile%\TBuild
+          echo TBUILD=%GITHUB_WORKSPACE%\TBuild>>%GITHUB_ENV%
+          echo LibrariesPath=%GITHUB_WORKSPACE%\TBuild\Libraries${{ env.ARCHITECTURE == 'x64' && '\win64' || '' }}>>%GITHUB_ENV%
+
+      - name: Get repository name
+        shell: bash
+        run: echo "REPO_NAME=${GITHUB_REPOSITORY##*/}" >> $GITHUB_ENV
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          path: ${{ env.TBUILD }}\${{ env.REPO_NAME }}
+
+      - name: Setup build environment
+        shell: bash
+        run: |
+          DOCPATH=$TBUILD/$REPO_NAME/docs/building-win.md
+          [ "${{ env.ARCHITECTURE }}" = x64 ] && DOCPATH=$TBUILD/$REPO_NAME/docs/building-win-x64.md
+          
+          # Extract SDK version from documentation
+          if [ -f "$DOCPATH" ]; then
+            SDK="$(grep "SDK version" $DOCPATH | sed -r 's/.*\*\*(.*)\*\* SDK version.*/\1/' || echo '')"
+          fi
+          SDK="${SDK:-10.0.22000.0}"
+          echo "SDK=$SDK" >> $GITHUB_ENV
+
+          # Fix CMake debug flags
+          sed -i '/CMAKE_${lang}_FLAGS_DEBUG_INIT/s/${_Zi}//' "$PROGRAMFILES"/CMake/share/cmake*/Modules/Platform/Windows-MSVC.cmake 2>/dev/null || true
+
+          # Generate cache key
+          if [ -f "$TBUILD/$REPO_NAME/$PREPARE_PATH" ]; then
+            echo "$(sha256sum $TBUILD/$REPO_NAME/$PREPARE_PATH | awk '{ print $1 }')" >> CACHE_KEY.txt
+          fi
+          echo "$SDK" >> CACHE_KEY.txt
+          echo "CACHE_KEY=$(sha256sum CACHE_KEY.txt | awk '{ print $1 }')" >> $GITHUB_ENV
+
+          # Configure git for patches
+          git config --global user.email "build@example.com"
+          git config --global user.name "Build System"
+
+      - name: Setup MSVC Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: ${{ env.ARCHITECTURE }}
+          sdk: ${{ env.SDK }}
+
+      - name: Configure NuGet sources
+        run: |
+          nuget sources Disable -Name "Microsoft Visual Studio Offline Packages"
+          nuget sources Add -Source https://api.nuget.org/v3/index.json & exit 0
+
+      - name: Cache ThirdParty dependencies
+        id: cache-third-party
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TBUILD }}\ThirdParty
+          key: ${{ runner.OS }}-${{ runner.arch }}-third-party-${{ env.CACHE_KEY }}
+          restore-keys: ${{ runner.OS }}-${{ runner.arch }}-third-party-
+
+      - name: Cache Libraries
+        id: cache-libs
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.LibrariesPath }}\*
+            !${{ env.LibrariesPath }}\cache_keys
+            !${{ env.LibrariesPath }}\[qQ]t[_-]*
+            ${{ env.LibrariesPath }}\cache_keys\*
+            !${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
+          key: ${{ runner.OS }}-${{ env.ARCHITECTURE }}-libs-${{ env.CACHE_KEY }}
+          restore-keys: ${{ runner.OS }}-${{ env.ARCHITECTURE }}-libs-
+
+      - name: Cache Qt
+        id: cache-qt
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.LibrariesPath }}\[qQ]t[_-]*
+            ${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
+          key: ${{ runner.OS }}-${{ env.ARCHITECTURE }}-${{ env.QT_VERSION }}-${{ env.CACHE_KEY }}
+          restore-keys: ${{ runner.OS }}-${{ env.ARCHITECTURE }}-${{ env.QT_VERSION }}-
+
+      - name: Build dependencies
+        env:
+          GYP_MSVS_OVERRIDE_PATH: 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\'
+          GYP_MSVS_VERSION: 2022
+        run: |
+          %TBUILD%\%REPO_NAME%\Telegram\build\prepare\win.bat skip-release silent ${{ env.QT_VERSION == 'qt5' && '' || 'qt6' }}
+
+      - name: Configure build settings
+        shell: bash
+        run: |
+          ARTIFACT_NAME="Telegram-${{ env.ARCHITECTURE }}-${{ env.BUILD_TYPE }}"
+          
+          # Set architecture flag
+          ARCH=""
+          case "${{ env.ARCHITECTURE }}" in
+            x64_x86) ARCH="x86";;
+            arm64) ARCH="arm";;
+            *) ARCH="${{ env.ARCHITECTURE }}";;
+          esac
+          echo "TDESKTOP_BUILD_ARCH=$ARCH" >> $GITHUB_ENV
+          
+          # Add Qt version to artifact name
+          ARTIFACT_NAME="${ARTIFACT_NAME}-${{ env.QT_VERSION }}"
+          
+          echo "ARTIFACT_NAME=$ARTIFACT_NAME" >> $GITHUB_ENV
+          
+          # Set API configuration
+          API="-D TDESKTOP_API_TEST=ON"
+          if [ "$GITHUB_REF" == 'refs/heads/nightly' ]; then
+            API="-D TDESKTOP_API_ID=611335 -D TDESKTOP_API_HASH=d524b414d21f4d37f08684c1df41ac9c"
+          fi
+          echo "TDESKTOP_BUILD_API=$API" >> $GITHUB_ENV
+
+      - name: Free disk space
+        shell: bash
+        run: |
+          find $LibrariesPath '(' '(' ! '(' -name '*.lib' -o -name '*.a' -o -name '*.exe' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' ')' -type f ')' -o -empty ')' -delete 2>/dev/null || true
+
+      - name: Build Telegram Desktop
+        run: |
+          cd %TBUILD%\%REPO_NAME%\Telegram
+
+          call configure.bat ^
+          %TDESKTOP_BUILD_ARCH% ^
+          ${{ env.QT_VERSION == 'qt5' && '' || 'qt6' }} ^
+          %TDESKTOP_BUILD_API% ^
+          -D CMAKE_CONFIGURATION_TYPES=${{ env.BUILD_TYPE }} ^
+          -D CMAKE_COMPILE_WARNING_AS_ERROR=ON ^
+          -D CMAKE_MSVC_DEBUG_INFORMATION_FORMAT= ^
+          -D DESKTOP_APP_DISABLE_AUTOUPDATE=OFF ^
+          -D DESKTOP_APP_DISABLE_CRASH_REPORTS=OFF
+
+          cmake --build ..\out --config ${{ env.BUILD_TYPE }} --parallel
+
+      - name: Prepare artifacts
+        if: env.UPLOAD_ARTIFACT == 'true'
+        run: |
+          set OUT=%TBUILD%\%REPO_NAME%\out\${{ env.BUILD_TYPE }}
+          mkdir artifact
+          if exist %OUT%\Telegram.exe move %OUT%\Telegram.exe artifact\
+          if exist %OUT%\Updater.exe move %OUT%\Updater.exe artifact\
+          
+      - name: Upload build artifacts
+        if: env.UPLOAD_ARTIFACT == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: artifact\
+          retention-days: 30
+
+      - name: Build summary
+        if: always()
+        shell: bash
+        run: |
+          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Setting | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Architecture | ${{ env.ARCHITECTURE }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build Type | ${{ env.BUILD_TYPE }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Qt Version | ${{ env.QT_VERSION }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Artifact Name | ${{ env.ARTIFACT_NAME }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Status | ${{ job.status }} |" >> $GITHUB_STEP_SUMMARY

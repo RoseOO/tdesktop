@@ -703,6 +703,8 @@ PRIVATE
     data/data_web_page.h
     dialogs/ui/dialogs_layout.cpp
     dialogs/ui/dialogs_layout.h
+    dialogs/ui/file_search_grid.cpp
+    dialogs/ui/file_search_grid.h
     dialogs/ui/dialogs_message_view.cpp
     dialogs/ui/dialogs_message_view.h
     dialogs/ui/dialogs_stories_content.cpp

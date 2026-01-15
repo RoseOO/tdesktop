@@ -183,6 +183,13 @@ public:
 		return _moderateCommonGroups;
 	}
 
+	void setFileSearchGridEnabled(bool enabled) {
+		_fileSearchGridEnabled = enabled;
+	}
+	[[nodiscard]] bool fileSearchGridEnabled() const {
+		return _fileSearchGridEnabled;
+	}
+
 private:
 	static constexpr auto kDefaultSupportChatsLimitSlice = 7 * 24 * 60 * 60;
 	static constexpr auto kPhotoEditorHintMaxShowsCount = 5;
@@ -230,6 +237,8 @@ private:
 	Data::SetupEmailState _setupEmailState;
 
 	std::vector<PeerId> _moderateCommonGroups;
+
+	bool _fileSearchGridEnabled = false;
 
 };
 
